@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/amenzhinsky/iothub/logger"
+	"github.com/maxtar/iothub/logger"
 	"net/url"
 	"strconv"
 	"strings"
@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/amenzhinsky/iothub/common"
-	"github.com/amenzhinsky/iothub/iotdevice/transport"
+	"github.com/maxtar/iothub/common"
+	"github.com/maxtar/iothub/iotdevice/transport"
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
@@ -355,8 +355,8 @@ func (tr *Transport) request(ctx context.Context, topic string, b []byte) (*resp
 			return nil, fmt.Errorf("request failed with %d response code", r.code)
 		}
 		return r, nil
-	case <-time.After(30 * time.Second):
-		return nil, errors.New("request timed out")
+	/* case <-time.After(30 * time.Second):
+		return nil, errors.New("request timed out") */
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}

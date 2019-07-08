@@ -11,13 +11,13 @@ See [TODO](#todo) section to see what's missing in the library.
 To install the library as a dependency:
 
 ```bash
-go get -u github.com/amenzhinsky/iothub
+go get -u github.com/maxtar/iothub
 ```
 
 To install CLI applications:
 
 ```bash
-GO111MODULE=on go get -u github.com/amenzhinsky/iothub/cmd/{iothub-service,iothub-device}
+GO111MODULE=on go get -u github.com/maxtar/iothub/cmd/{iothub-service,iothub-device}
 ```
 
 ## Usage Example
@@ -33,7 +33,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/amenzhinsky/iothub/iotservice"
+	"github.com/maxtar/iothub/iotservice"
 )
 
 func main() {
@@ -62,8 +62,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/amenzhinsky/iothub/iotdevice"
-	iotmqtt "github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
+	"github.com/maxtar/iothub/iotdevice"
+	iotmqtt "github.com/maxtar/iothub/iotdevice/transport/mqtt"
 )
 
 func main() {
@@ -86,11 +86,11 @@ func main() {
 }
 ```
 
-[cmd/iothub-service](https://github.com/amenzhinsky/iothub/blob/master/cmd/iothub-service) and [cmd/iothub-device](https://github.com/amenzhinsky/iothub/blob/master/cmd/iothub-device) are reference implementations of almost all available features. 
+[cmd/iothub-service](https://github.com/maxtar/iothub/blob/master/cmd/iothub-service) and [cmd/iothub-device](https://github.com/maxtar/iothub/blob/master/cmd/iothub-device) are reference implementations of almost all available features.
 
 ## CLI
 
-The project provides two command line utilities: `iothub-device` and `iothub-sevice`. First is for using it on IoT devices and the second manages and interacts with them. 
+The project provides two command line utilities: `iothub-device` and `iothub-sevice`. First is for using it on IoT devices and the second manages and interacts with them.
 
 You can perform operations like publishing, subscribing to events and feedback, registering and invoking direct methods and so on straight from the command line.
 

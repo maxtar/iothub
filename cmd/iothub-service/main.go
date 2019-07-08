@@ -12,10 +12,10 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/amenzhinsky/iothub/cmd/internal"
-	"github.com/amenzhinsky/iothub/eventhub"
-	"github.com/amenzhinsky/iothub/iotservice"
-	"github.com/amenzhinsky/iothub/logger"
+	"github.com/maxtar/iothub/cmd/internal"
+	"github.com/maxtar/iothub/eventhub"
+	"github.com/maxtar/iothub/iotservice"
+	"github.com/maxtar/iothub/logger"
 )
 
 // globally accessible by command handlers, is it a good idea?
@@ -100,7 +100,7 @@ func main() {
 	}
 }
 
-const help = `Helps with interacting and managing your iothub devices. 
+const help = `Helps with interacting and managing your iothub devices.
 The $IOTHUB_SERVICE_CONNECTION_STRING environment variable is required for authentication.`
 
 func run() error {
