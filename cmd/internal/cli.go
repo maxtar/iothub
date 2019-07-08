@@ -1,13 +1,12 @@
 package internal
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"sort"
+	"strings"
 )
 
 // ErrInvalidUsage when returned by a Handler the usage message is displayed.
@@ -16,15 +15,14 @@ var ErrInvalidUsage = errors.New("invalid usage")
 // Command is a cli subcommand.
 type Command struct {
 	Name      string
-	Alias     string
-	Help      string
+	Args      []string
 	Desc      string
 	Handler   HandlerFunc
 	ParseFunc func(*flag.FlagSet)
 }
 
 // HandlerFunc is a subcommand handler, fs is already parsed.
-type HandlerFunc func(ctx context.Context, fs *flag.FlagSet) error
+type HandlerFunc func(args []string) error
 
 // FlagFunc prepares fs for parsing, setting flags.
 type FlagFunc func(fs *flag.FlagSet)
@@ -37,25 +35,13 @@ type CLI struct {
 }
 
 // New creates new cli executor.
-func New(desc string, f FlagFunc, cmds []*Command) (*CLI, error) {
-	r := &CLI{
+func New(desc string, f FlagFunc, cmds []*Command) *CLI {
+	return &CLI{
 		desc: desc,
-		cmds: make([]*Command, len(cmds)),
+		cmds: cmds,
 		main: f,
 	}
-	copy(r.cmds, cmds)
-
-	// sort subcommands alphabetically
-	sort.Slice(r.cmds, func(i, j int) bool {
-		return r.cmds[i].Name < r.cmds[j].Name
-	})
-	return r, nil
 }
-
-const (
-	commonUsage  = "usage: %s [FLAGS...] {COMMAND} [FLAGS...] [ARGS]...\n\n%s\n\ncommands:\n"
-	commandUsage = "usage: %s [FLAGS...] %s [FLAGS....] %s\n\nflags:\n"
-)
 
 // Run runs one or the given commands based on argv.
 //
@@ -63,7 +49,7 @@ const (
 //
 // If ErrInvalidUsage is returned there's no need to print it,
 // the usage message is already sent to STDERR.
-func (r *CLI) Run(ctx context.Context, argv ...string) error {
+func (r *CLI) Run(argv []string) error {
 	if len(argv) == 0 {
 		panic("empty argv")
 	}
@@ -73,12 +59,17 @@ func (r *CLI) Run(ctx context.Context, argv ...string) error {
 		r.main(sm)
 	}
 	sm.Usage = func() {
-		fmt.Fprintf(os.Stderr, commonUsage, sm.Name(), r.desc)
+		fmt.Fprintf(os.Stderr, `Usage: %s [option...] COMMAND [option...] [arg...]
+
+%s
+
+Commands:
+`, sm.Name(), r.desc)
 		for _, cmd := range r.cmds {
-			fmt.Fprintf(os.Stderr, "  %-22s %s\n", cmd.Name+","+cmd.Alias, cmd.Desc)
+			fmt.Fprintf(os.Stderr, "  %-25s %s\n", cmd.Name, cmd.Desc)
 		}
 		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "common flags: ")
+		fmt.Fprintln(os.Stderr, "Common options: ")
 		sm.PrintDefaults()
 	}
 
@@ -101,15 +92,22 @@ func (r *CLI) Run(ctx context.Context, argv ...string) error {
 	}
 
 	sc := flag.NewFlagSet(sm.Arg(0), flag.ContinueOnError)
-	sc.Usage = func() {
-		fmt.Fprintf(os.Stderr, commandUsage, sm.Name(), sm.Arg(0), cmd.Help)
-		sc.PrintDefaults()
-		fmt.Fprintln(os.Stderr)
-		fmt.Fprintln(os.Stderr, "common flags: ")
-		sm.PrintDefaults()
-	}
 	if cmd.ParseFunc != nil {
 		cmd.ParseFunc(sc)
+	}
+	sc.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: %s [option...] %s ", sm.Name(), sm.Arg(0))
+		if hasFlags(sc) {
+			fmt.Fprintf(os.Stderr, "[option...] ")
+		}
+		fmt.Fprintln(os.Stderr, strings.Join(cmd.Args, " "))
+		if hasFlags(sc) {
+			fmt.Fprintln(os.Stderr, "\nOptions:")
+			sc.PrintDefaults()
+		}
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Common options: ")
+		sm.PrintDefaults()
 	}
 	if err := sc.Parse(sm.Args()[1:]); err != nil {
 		if err == flag.ErrHelp {
@@ -117,7 +115,11 @@ func (r *CLI) Run(ctx context.Context, argv ...string) error {
 		}
 		return err
 	}
-	if err := cmd.Handler(ctx, sc); err != nil {
+	if len(cmd.Args) != sc.NArg() {
+		sc.Usage()
+		return ErrInvalidUsage
+	}
+	if err := cmd.Handler(sc.Args()); err != nil {
 		if err == ErrInvalidUsage {
 			sc.Usage()
 		}
@@ -126,26 +128,21 @@ func (r *CLI) Run(ctx context.Context, argv ...string) error {
 	return nil
 }
 
+func hasFlags(fs *flag.FlagSet) bool {
+	var has bool
+	fs.VisitAll(func(f *flag.Flag) {
+		has = true
+	})
+	return has
+}
+
 func (r *CLI) findCommand(k string) *Command {
 	for _, cmd := range r.cmds {
-		if cmd.Name == k || cmd.Alias == k {
+		if cmd.Name == k {
 			return cmd
 		}
 	}
 	return nil
-}
-
-// sliceToMap converts sequence of arguments into a key-value map.
-// [a, b, c, d] => {a: b, c: d} or errors when number of args is not even.
-func ArgsToMap(s []string) (map[string]string, error) {
-	if len(s)%2 != 0 {
-		return nil, errors.New("number of key-value arguments must be even")
-	}
-	m := make(map[string]string, len(s)%2)
-	for i := 0; i < len(s); i += 2 {
-		m[s[i]] = s[i+1]
-	}
-	return m, nil
 }
 
 // OutputLine prints the given string to stdout appending a new-line char.
@@ -154,16 +151,15 @@ func OutputLine(format string) error {
 	return err
 }
 
-// OutputJSON prints indented json to stdout.
-func OutputJSON(v interface{}, compress bool) error {
-	indent := "\t"
-	if compress {
-		indent = ""
+func Output(v interface{}, format string) error {
+	switch format {
+	case "json":
+		return json.NewEncoder(os.Stdout).Encode(v)
+	case "json-pretty":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "\t")
+		return enc.Encode(v)
+	default:
+		return fmt.Errorf("unknown output format: %q", format)
 	}
-	b, err := json.MarshalIndent(v, "", indent)
-	if err != nil {
-		return err
-	}
-	fmt.Println(string(b))
-	return nil
 }

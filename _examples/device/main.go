@@ -6,13 +6,12 @@ import (
 	"os"
 
 	"github.com/amenzhinsky/iothub/iotdevice"
-	"github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
+	iotmqtt "github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
 )
 
 func main() {
-	c, err := iotdevice.NewClient(
-		iotdevice.WithTransport(mqtt.New()),
-		iotdevice.WithConnectionString(os.Getenv("DEVICE_CONNECTION_STRING")),
+	c, err := iotdevice.NewFromConnectionString(
+		iotmqtt.New(), os.Getenv("IOTHUB_DEVICE_CONNECTION_STRING"),
 	)
 	if err != nil {
 		log.Fatal(err)
@@ -24,10 +23,7 @@ func main() {
 	}
 
 	// send a device-to-cloud message
-	if err = c.SendEvent(context.Background(), []byte(`hello`),
-		iotdevice.WithSendProperty("foo", "bar"),
-		iotdevice.WithSendQoS(0), // 1 is the default value
-	); err != nil {
+	if err = c.SendEvent(context.Background(), []byte("hello")); err != nil {
 		log.Fatal(err)
 	}
 }

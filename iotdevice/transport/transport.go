@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/tls"
+	"github.com/amenzhinsky/iothub/logger"
 	"time"
 
 	"github.com/amenzhinsky/iothub/common"
@@ -10,6 +11,7 @@ import (
 
 // Transport interface.
 type Transport interface {
+	SetLogger(logger logger.Logger)
 	Connect(ctx context.Context, creds Credentials) error
 	Send(ctx context.Context, msg *common.Message) error
 	RegisterDirectMethods(ctx context.Context, mux MethodDispatcher) error
@@ -18,6 +20,13 @@ type Transport interface {
 	RetrieveTwinProperties(ctx context.Context) (payload []byte, err error)
 	UpdateTwinProperties(ctx context.Context, payload []byte) (version int, err error)
 	Close() error
+}
+
+type Credentials interface {
+	GetDeviceID() string
+	GetHostName() string
+	GetCertificate() *tls.Certificate
+	Token(resource string, lifetime time.Duration) (*common.SharedAccessSignature, error)
 }
 
 // MessageDispatcher handles incoming messages.
@@ -33,13 +42,4 @@ type TwinStateDispatcher interface {
 // MethodDispatcher handles direct method calls.
 type MethodDispatcher interface {
 	Dispatch(methodName string, b []byte) (rc int, data []byte, err error)
-}
-
-// Credentials is connection credentials needed for x509 or sas authentication.
-type Credentials interface {
-	DeviceID() string
-	Hostname() string
-	TLSConfig() *tls.Config
-	IsSAS() bool
-	Token(ctx context.Context, uri string, d time.Duration) (string, error)
 }

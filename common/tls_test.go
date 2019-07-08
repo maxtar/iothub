@@ -6,9 +6,7 @@ import (
 	"testing"
 )
 
-func TestTLSConfig(t *testing.T) {
-	t.Parallel()
-
+func TestRootCAs(t *testing.T) {
 	r, err := http.NewRequest(http.MethodGet, "https://portal.azure.com", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -16,10 +14,13 @@ func TestTLSConfig(t *testing.T) {
 
 	c := &http.Client{Transport: &http.Transport{
 		TLSClientConfig: &tls.Config{
-			RootCAs: RootCAs(),
+			ServerName: "portal.azure.com",
+			RootCAs:    RootCAs(),
 		},
 	}}
-	if _, err := c.Do(r); err != nil {
+	res, err := c.Do(r)
+	if err != nil {
 		t.Fatal(err)
 	}
+	defer res.Body.Close()
 }

@@ -12,78 +12,98 @@ import (
 	"time"
 )
 
-// ParseConnectionString parses the given string into a Credentials struct.
-// If you use a shared access policy DeviceId is needed to be added manually.
-func ParseConnectionString(cs string) (*Credentials, error) {
-	chunks := strings.Split(cs, ";")
-	if len(chunks) != 3 && len(chunks) != 4 {
-		return nil, errors.New("malformed connection string")
+// ParseConnectionString parses the given connection string into a key-value map,
+// returns an error if at least one of required keys is missing.
+func ParseConnectionString(cs string, require ...string) (map[string]string, error) {
+	m := map[string]string{}
+	for _, s := range strings.Split(cs, ";") {
+		if s == "" {
+			continue
+		}
+		kv := strings.SplitN(s, "=", 2)
+		if len(kv) != 2 {
+			return nil, errors.New("malformed connection string")
+		}
+		m[kv[0]] = kv[1]
 	}
-
-	m := &Credentials{}
-	for _, chunk := range chunks {
-		c := strings.SplitN(chunk, "=", 2)
-		switch c[0] {
-		case "HostName":
-			m.HostName = c[1]
-		case "DeviceId":
-			m.DeviceID = c[1]
-		case "SharedAccessKey":
-			m.SharedAccessKey = c[1]
-		case "SharedAccessKeyName":
-			m.SharedAccessKeyName = c[1]
+	for _, k := range require {
+		if s := m[k]; s == "" {
+			return nil, fmt.Errorf("%s is required", k)
 		}
 	}
 	return m, nil
 }
 
-// Credentials contains all the required credentials
-// to access iothub from a device's prospective.
-type Credentials struct {
-	HostName            string
-	DeviceID            string
-	SharedAccessKey     string
-	SharedAccessKeyName string
-
-	// needed for testing
-	now time.Time
+// NewSharedAccessKey creates new shared access key for subsequent token generation.
+func NewSharedAccessKey(hostname, policy, key string) *SharedAccessKey {
+	return &SharedAccessKey{
+		HostName:            hostname,
+		SharedAccessKeyName: policy,
+		SharedAccessKey:     key,
+	}
 }
 
-// SAS generates an access token for the given uri and duration.
-func (c *Credentials) SAS(uri string, duration time.Duration) (string, error) {
-	if uri == "" {
-		return "", errors.New("uri is blank")
-	}
-	if duration == 0 {
-		return "", errors.New("duration is zero")
-	}
-	if c.SharedAccessKey == "" {
-		return "", errors.New("SharedAccessKey is blank")
-	}
+// SharedAccessKey is SAS token generator.
+type SharedAccessKey struct {
+	HostName            string
+	SharedAccessKeyName string
+	SharedAccessKey     string
+}
 
-	sr := url.QueryEscape(uri)
-	ts := time.Now()
-	if !c.now.IsZero() {
-		ts = c.now
-	}
-	se := ts.Add(duration).Unix()
+// Token generates a shared access signature for the named resource and lifetime.
+func (c *SharedAccessKey) Token(
+	resource string, lifetime time.Duration,
+) (*SharedAccessSignature, error) {
+	return NewSharedAccessSignature(
+		resource, c.SharedAccessKeyName, c.SharedAccessKey, time.Now().Add(lifetime),
+	)
+}
 
-	b, err := base64.StdEncoding.DecodeString(c.SharedAccessKey)
+// NewSharedAccessSignature initialized a new shared access signature
+// and generates signature fields based on the given input.
+func NewSharedAccessSignature(
+	resource, policy, key string, expiry time.Time,
+) (*SharedAccessSignature, error) {
+	sig, err := mksig(resource, key, expiry)
+	if err != nil {
+		return nil, err
+	}
+	return &SharedAccessSignature{
+		Sr:  resource,
+		Sig: sig,
+		Se:  expiry,
+		Skn: policy,
+	}, nil
+}
+
+func mksig(sr, key string, se time.Time) (string, error) {
+	b, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
 		return "", err
 	}
-
-	// generate signature from uri and expiration time.
-	e := fmt.Sprintf("%s\n%d", sr, se)
 	h := hmac.New(sha256.New, b)
-	_, err = h.Write([]byte(e))
-	if err != nil {
+	if _, err := fmt.Fprintf(h, "%s\n%d", url.QueryEscape(sr), se.Unix()); err != nil {
 		return "", err
 	}
+	return base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
+}
 
-	return "SharedAccessSignature " +
-		"sr=" + sr +
-		"&sig=" + url.QueryEscape(base64.StdEncoding.EncodeToString(h.Sum(nil))) +
-		"&se=" + url.QueryEscape(strconv.FormatInt(se, 10)) +
-		"&skn=" + url.QueryEscape(c.SharedAccessKeyName), nil
+// SharedAccessSignature is a shared access signature instance.
+type SharedAccessSignature struct {
+	Sr  string
+	Sig string
+	Se  time.Time
+	Skn string
+}
+
+// String converts the signature to a token string.
+func (sas *SharedAccessSignature) String() string {
+	s := "SharedAccessSignature " +
+		"sr=" + url.QueryEscape(sas.Sr) +
+		"&sig=" + url.QueryEscape(sas.Sig) +
+		"&se=" + url.QueryEscape(strconv.FormatInt(sas.Se.Unix(), 10))
+	if sas.Skn != "" {
+		s += "&skn=" + url.QueryEscape(sas.Skn)
+	}
+	return s
 }

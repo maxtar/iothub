@@ -9,83 +9,80 @@ import (
 
 	"github.com/amenzhinsky/iothub/common"
 	"github.com/amenzhinsky/iothub/iotdevice/transport"
+	"github.com/amenzhinsky/iothub/logger"
 )
 
 // ClientOption is a client configuration option.
-type ClientOption func(c *Client) error
+type ClientOption func(c *Client)
 
 // WithLogger changes default logger, default it an stdout logger.
-func WithLogger(l common.Logger) ClientOption {
-	return func(c *Client) error {
+func WithLogger(l logger.Logger) ClientOption {
+	return func(c *Client) {
 		c.logger = l
-		return nil
 	}
 }
 
-// WithTransport changes default transport.
-func WithTransport(tr transport.Transport) ClientOption {
-	if tr == nil {
-		panic("transport is nil")
+// NewFromConnectionString creates a device client based on the given connection string.
+func NewFromConnectionString(
+	transport transport.Transport, cs string, opts ...ClientOption,
+) (*Client, error) {
+	creds, err := ParseConnectionString(cs)
+	if err != nil {
+		return nil, err
 	}
-	return func(c *Client) error {
-		c.tr = tr
-		return nil
-	}
+	return New(transport, creds, opts...)
 }
 
-// WithCredentials sets custom authentication credentials, e.g. 3rd-party token provider.
-func WithCredentials(creds transport.Credentials) ClientOption {
-	if creds == nil {
-		panic("creds is nil")
+func ParseConnectionString(cs string) (*SharedAccessKeyCredentials, error) {
+	m, err := common.ParseConnectionString(cs, "DeviceId", "SharedAccessKey")
+	if err != nil {
+		return nil, err
 	}
-	return func(c *Client) error {
-		c.creds = creds
-		return nil
-	}
+	return &SharedAccessKeyCredentials{
+		DeviceID: m["DeviceId"],
+		SharedAccessKey: common.SharedAccessKey{
+			HostName:            m["HostName"],
+			SharedAccessKeyName: m["SharedAccessKeyName"],
+			SharedAccessKey:     m["SharedAccessKey"],
+		},
+	}, nil
 }
 
-// WithConnectionString same as WithCredentials,
-// but it parses the given connection string first.
-func WithConnectionString(cs string) ClientOption {
-	return func(c *Client) error {
-		var err error
-		c.creds, err = NewSASCredentials(cs)
-		if err != nil {
-			return err
-		}
-		return nil
-	}
+func NewFromX509Cert(
+	transport transport.Transport,
+	deviceID, hostName string, crt *tls.Certificate,
+	opts ...ClientOption,
+) (*Client, error) {
+	return New(transport, &X509Credentials{
+		DeviceID:    deviceID,
+		HostName:    hostName,
+		Certificate: crt,
+	}, opts...)
 }
 
-// WithX509FromCert enables x509 authentication.
-func WithX509FromCert(deviceID, hostname string, crt *tls.Certificate) ClientOption {
-	return func(c *Client) error {
-		var err error
-		c.creds, err = NewX509Credentials(deviceID, hostname, crt)
-		if err != nil {
-			return err
-		}
-		return nil
+func NewFromX509FromFile(
+	transport transport.Transport,
+	deviceID, hostname, certFile, keyFile string,
+	opts ...ClientOption,
+) (*Client, error) {
+	crt, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, err
 	}
+	return NewFromX509Cert(transport, deviceID, hostname, &crt, opts...)
 }
 
-// WithX509FromFile is same as `WithX509FromCert` but parses the given pem files first.
-func WithX509FromFile(deviceID, hostname, certFile, keyFile string) ClientOption {
-	return func(c *Client) error {
-		crt, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return err
-		}
-		return WithX509FromCert(deviceID, hostname, &crt)(c)
-	}
-}
-
-// NewClient returns new iothub client.
-func NewClient(opts ...ClientOption) (*Client, error) {
+// New returns new iothub client.
+func New(
+	transport transport.Transport, creds transport.Credentials, opts ...ClientOption,
+) (*Client, error) {
 	c := &Client{
+		tr:    transport,
+		creds: creds,
+
 		ready:  make(chan struct{}),
 		done:   make(chan struct{}),
-		logger: common.NewLogWrapper(false),
+		logger: logger.New(logger.LevelWarn, nil),
 
 		evMux: newEventsMux(),
 		tsMux: newTwinStateMux(),
@@ -93,16 +90,11 @@ func NewClient(opts ...ClientOption) (*Client, error) {
 	}
 
 	for _, opt := range opts {
-		if err := opt(c); err != nil {
-			return nil, err
-		}
+		opt(c)
 	}
-	if c.creds == nil {
-		return nil, errors.New("credentials required")
-	}
-	if c.tr == nil {
-		return nil, errors.New("transport required")
-	}
+
+	// transport uses the same logger as the client
+	c.tr.SetLogger(c.logger)
 	return c, nil
 }
 
@@ -111,7 +103,7 @@ type Client struct {
 	creds transport.Credentials
 	tr    transport.Transport
 
-	logger common.Logger
+	logger logger.Logger
 
 	mu    sync.RWMutex
 	ready chan struct{}
@@ -127,7 +119,7 @@ type DirectMethodHandler func(p map[string]interface{}) (map[string]interface{},
 
 // DeviceID returns iothub device id.
 func (c *Client) DeviceID() string {
-	return c.creds.DeviceID()
+	return c.creds.GetDeviceID()
 }
 
 // Connect connects to the iothub all subsequent calls
@@ -326,9 +318,6 @@ func WithSendProperties(m map[string]string) SendOption {
 func (c *Client) SendEvent(ctx context.Context, payload []byte, opts ...SendOption) error {
 	if err := c.checkConnection(ctx); err != nil {
 		return err
-	}
-	if payload == nil {
-		return errors.New("payload is nil")
 	}
 	msg := &common.Message{Payload: payload}
 	for _, opt := range opts {

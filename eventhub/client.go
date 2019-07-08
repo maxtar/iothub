@@ -1,91 +1,214 @@
+// The package implements a minimal set of Azure Event Hubs functionality.
+//
+// We could use https://github.com/Azure/azure-event-hubs-go but it's too huge
+// and also it has a number of dependencies that aren't desired in the project.
 package eventhub
 
 import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
-	"sync"
+	"strings"
 	"time"
 
-	"github.com/amenzhinsky/iothub/common"
 	"pack.ag/amqp"
 )
 
-// Dial connects to the named amqp broker and returns an eventhub client.
-func Dial(addr string, tlsConfig *tls.Config) (*Client, error) {
-	conn, err := amqp.Dial(addr,
-		amqp.ConnTLSConfig(tlsConfig),
-	)
-	if err != nil {
-		return nil, err
-	}
-	sess, err := conn.NewSession()
-	if err != nil {
-		conn.Close()
-		return nil, err
-	}
-	return &Client{
-		conn: conn,
-		sess: sess,
-		done: make(chan struct{}),
-	}, nil
+// Credentials is an evenhub connection string representation.
+type Credentials struct {
+	Endpoint            string
+	SharedAccessKeyName string
+	SharedAccessKey     string
+	EntityPath          string
 }
 
-// Client is eventhub client.
+// ParseConnectionString parses the given connection string into Credentials structure.
+func ParseConnectionString(cs string) (*Credentials, error) {
+	var c Credentials
+	for _, s := range strings.Split(cs, ";") {
+		kv := strings.SplitN(s, "=", 2)
+		if len(kv) != 2 {
+			return nil, errors.New("malformed connection string")
+		}
+
+		switch kv[0] {
+		case "Endpoint":
+			if !strings.HasPrefix(kv[1], "sb://") {
+				return nil, errors.New("only sb:// schema supported")
+			}
+			c.Endpoint = strings.TrimRight(kv[1][5:], "/")
+		case "SharedAccessKeyName":
+			c.SharedAccessKeyName = kv[1]
+		case "SharedAccessKey":
+			c.SharedAccessKey = kv[1]
+		case "EntityPath":
+			c.EntityPath = kv[1]
+		}
+	}
+	return &c, nil
+}
+
+// Option is a client configuration option.
+type Option func(c *Client)
+
+// WithTLSConfig sets connection TLS configuration.
+func WithTLSConfig(tc *tls.Config) Option {
+	return WithConnOption(amqp.ConnTLSConfig(tc))
+}
+
+// WithSASLPlain configures connection username and password.
+func WithSASLPlain(username, password string) Option {
+	return WithConnOption(amqp.ConnSASLPlain(username, password))
+}
+
+// WithConnOption sets a low-level connection option.
+func WithConnOption(opt amqp.ConnOption) Option {
+	return func(c *Client) {
+		c.opts = append(c.opts, opt)
+	}
+}
+
+// WithLogger sets client logger.
+func WithLogger(l Logger) Option {
+	return func(c *Client) {
+		c.logger = l
+	}
+}
+
+// Logger is a logging instance.
+type Logger interface {
+	Debugf(format string, v ...interface{})
+}
+
+// Dial connects to the named EventHub and returns a client instance.
+func Dial(host, name string, opts ...Option) (*Client, error) {
+	c := &Client{name: name}
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	var err error
+	c.conn, err = amqp.Dial("amqps://"+host, c.opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	c.debugf("connected to %s", host)
+	return c, nil
+}
+
+// DialConnectionString dials an EventHub instance using the given connection string.
+func DialConnectionString(cs string, opts ...Option) (*Client, error) {
+	creds, err := ParseConnectionString(cs)
+	if err != nil {
+		return nil, err
+	}
+	return Dial(creds.Endpoint, creds.EntityPath, append([]Option{
+		WithSASLPlain(creds.SharedAccessKeyName, creds.SharedAccessKey),
+	}, opts...)...)
+}
+
+// Client is an EventHub client.
 type Client struct {
-	mu   sync.Mutex
-	conn *amqp.Client
-	sess *amqp.Session
-	done chan struct{}
+	name   string
+	conn   *amqp.Client
+	opts   []amqp.ConnOption
+	logger Logger
 }
 
-func (c *Client) Sess() *amqp.Session {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.sess
+// SubscribeOption is a Subscribe option.
+type SubscribeOption func(r *sub)
+
+// WithSubscribeConsumerGroup overrides default consumer group, default is `$Default`.
+func WithSubscribeConsumerGroup(name string) SubscribeOption {
+	return func(s *sub) {
+		s.group = name
+	}
 }
 
-func (c *Client) SubscribePartitions(ctx context.Context, name, group string, f func(*amqp.Message)) error {
-	return SubscribePartitions(ctx, c.sess, name, group, f)
+// WithSubscribeSince requests events that occurred after the given time.
+func WithSubscribeSince(t time.Time) SubscribeOption {
+	return WithSubscribeLinkOption(amqp.LinkSelectorFilter(
+		fmt.Sprintf("amqp.annotation.x-opt-enqueuedtimeutc > '%d'",
+			t.UnixNano()/int64(time.Millisecond)),
+	))
 }
 
-func SubscribePartitions(ctx context.Context, sess *amqp.Session, name, group string, f func(*amqp.Message)) error {
-	ids, err := getPartitionIDs(ctx, sess, name)
+// WithSubscribeLinkOption is a low-level subscription configuration option.
+func WithSubscribeLinkOption(opt amqp.LinkOption) SubscribeOption {
+	return func(s *sub) {
+		s.opts = append(s.opts, opt)
+	}
+}
+
+type sub struct {
+	group string
+	opts  []amqp.LinkOption
+}
+
+// Event is an Event Hub event, simply wraps an AMQP message.
+type Event struct {
+	*amqp.Message
+}
+
+// Subscribe subscribes to all hub's partitions and registers the given
+// handler and blocks until it encounters an error or the context is cancelled.
+//
+// It's client's responsibility to accept/reject/release events.
+func (c *Client) Subscribe(
+	ctx context.Context,
+	fn func(event *Event) error,
+	opts ...SubscribeOption,
+) error {
+	var s sub
+	for _, opt := range opts {
+		opt(&s)
+	}
+	if s.group == "" {
+		s.group = "$Default"
+	}
+
+	// initialize new session for each subscribe session
+	sess, err := c.conn.NewSession()
+	if err != nil {
+		return err
+	}
+	defer sess.Close(context.Background())
+
+	ids, err := c.getPartitionIDs(ctx, sess)
 	if err != nil {
 		return err
 	}
 
-	// stop all goroutines at return.
+	// stop all goroutines at return
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	msgc := make(chan *amqp.Message, len(ids))
 	errc := make(chan error, len(ids))
-	for _, id := range ids {
-		recv, err := sess.NewReceiver(
-			amqp.LinkSourceAddress(fmt.Sprintf("/%s/ConsumerGroups/%s/Partitions/%s", name, group, id)),
 
-			// TODO: make it configurable
-			amqp.LinkSelectorFilter(fmt.Sprintf("amqp.annotation.x-opt-enqueuedtimeutc > '%d'",
-				time.Now().UnixNano()/int64(time.Millisecond)),
-			),
+	for _, id := range ids {
+		addr := fmt.Sprintf("/%s/ConsumerGroups/%s/Partitions/%s", c.name, s.group, id)
+		c.debugf("subscribing to %s", addr)
+
+		recv, err := sess.NewReceiver(
+			append([]amqp.LinkOption{amqp.LinkSourceAddress(addr)}, s.opts...)...,
 		)
 		if err != nil {
 			return err
 		}
 
-		go func(r *amqp.Receiver) {
+		go func(recv *amqp.Receiver) {
 			defer recv.Close(context.Background())
 			for {
-				msg, err := r.Receive(ctx)
+				msg, err := recv.Receive(ctx)
 				if err != nil {
 					errc <- err
 					return
 				}
-				msg.Accept()
 				msgc <- msg
 			}
 		}(recv)
@@ -94,137 +217,20 @@ func SubscribePartitions(ctx context.Context, sess *amqp.Session, name, group st
 	for {
 		select {
 		case msg := <-msgc:
-			go f(msg)
+			if err := fn(&Event{msg}); err != nil {
+				return err
+			}
 		case err := <-errc:
 			return err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }
 
-const (
-	tokenUpdateInterval = time.Hour
-
-	// we need to update tokens before they expire to prevent disconnects
-	// from azure, without interrupting the message flow
-	tokenUpdateSpan = 10 * time.Minute
-)
-
-// PutTokenContinuously writes token first time in blocking mode and returns
-// maintaining token updates in the background until stopCh is closed.
-func (c *Client) PutTokenContinuously(
-	ctx context.Context,
-	audience string,
-	cred *common.Credentials,
-	stopCh chan struct{},
-) error {
-	token, err := cred.SAS(cred.HostName, tokenUpdateInterval)
-	if err != nil {
-		return err
-	}
-	if err := c.PutToken(ctx, audience, token); err != nil {
-		return err
-	}
-
-	go func() {
-		ticker := time.NewTimer(tokenUpdateInterval - tokenUpdateSpan)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ticker.C:
-				token, err := cred.SAS(cred.HostName, tokenUpdateInterval)
-				if err != nil {
-					log.Printf("genegate SAS token error: %s", err)
-					return
-				}
-				if err := c.PutToken(context.Background(), audience, token); err != nil {
-					log.Printf("put token error: %s", err)
-					return
-				}
-				ticker.Reset(tokenUpdateInterval - tokenUpdateSpan)
-			case <-stopCh:
-				return
-			}
-		}
-	}()
-	return nil
-}
-
-func (c *Client) PutToken(ctx context.Context, audience, token string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	send, err := c.sess.NewSender(
-		amqp.LinkTargetAddress("$cbs"),
-	)
-	if err != nil {
-		return err
-	}
-	defer send.Close(context.Background())
-
-	recv, err := c.sess.NewReceiver(amqp.LinkSourceAddress("$cbs"))
-	if err != nil {
-		return err
-	}
-	defer recv.Close(context.Background())
-
-	if err = send.Send(ctx, &amqp.Message{
-		Value: token,
-		Properties: &amqp.MessageProperties{
-			To:      "$cbs",
-			ReplyTo: "cbs",
-		},
-		ApplicationProperties: map[string]interface{}{
-			"operation": "put-token",
-			"type":      "servicebus.windows.net:sastoken",
-			"name":      audience,
-		},
-	}); err != nil {
-		return err
-	}
-
-	msg, err := recv.Receive(ctx)
-	if err != nil {
-		return err
-	}
-	if err = CheckMessageResponse(msg); err != nil {
-		return err
-	}
-	msg.Accept()
-	return nil
-}
-
-// Close closes amqp session and connection.
-func (c *Client) Close() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	select {
-	case <-c.done:
-		return nil
-	default:
-		close(c.done)
-	}
-	if err := c.sess.Close(context.Background()); err != nil {
-		return err
-	}
-	return c.conn.Close()
-}
-
-// RandString generates a random 32 bytes long string.
-func RandString() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", b), nil
-}
-
-// getPartitionIDs returns partition ids for the named eventhub.
-func getPartitionIDs(ctx context.Context, sess *amqp.Session, name string) ([]string, error) {
-	replyTo, err := RandString()
-	if err != nil {
-		return nil, err
-	}
+// getPartitionIDs returns partition ids of the hub.
+func (c *Client) getPartitionIDs(ctx context.Context, sess *amqp.Session) ([]string, error) {
+	replyTo := genID()
 	recv, err := sess.NewReceiver(
 		amqp.LinkSourceAddress("$management"),
 		amqp.LinkTargetAddress(replyTo),
@@ -243,10 +249,7 @@ func getPartitionIDs(ctx context.Context, sess *amqp.Session, name string) ([]st
 	}
 	defer send.Close(context.Background())
 
-	mid, err := RandString()
-	if err != nil {
-		return nil, err
-	}
+	mid := genID()
 	if err := send.Send(ctx, &amqp.Message{
 		Properties: &amqp.MessageProperties{
 			MessageID: mid,
@@ -254,7 +257,7 @@ func getPartitionIDs(ctx context.Context, sess *amqp.Session, name string) ([]st
 		},
 		ApplicationProperties: map[string]interface{}{
 			"operation": "READ",
-			"name":      name,
+			"name":      c.name,
 			"type":      "com.microsoft:eventhub",
 		},
 	}); err != nil {
@@ -271,7 +274,9 @@ func getPartitionIDs(ctx context.Context, sess *amqp.Session, name string) ([]st
 	if msg.Properties.CorrelationID != mid {
 		return nil, errors.New("message-id mismatch")
 	}
-	msg.Accept()
+	if err := msg.Accept(); err != nil {
+		return nil, err
+	}
 
 	val, ok := msg.Value.(map[string]interface{})
 	if !ok {
@@ -282,6 +287,17 @@ func getPartitionIDs(ctx context.Context, sess *amqp.Session, name string) ([]st
 		return nil, errors.New("unable to typecast partition_ids")
 	}
 	return ids, nil
+}
+
+func (c *Client) debugf(format string, v ...interface{}) {
+	if c.logger != nil {
+		c.logger.Debugf(format, v...)
+	}
+}
+
+// Close closes underlying AMQP connection.
+func (c *Client) Close() error {
+	return c.conn.Close()
 }
 
 // CheckMessageResponse checks for 200 response code otherwise returns an error.
@@ -295,4 +311,12 @@ func CheckMessageResponse(msg *amqp.Message) error {
 	}
 	rd, _ := msg.ApplicationProperties["status-description"].(string)
 	return fmt.Errorf("code = %d, description = %q", rc, rd)
+}
+
+func genID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
 }

@@ -1,6 +1,7 @@
-package commonamqp
+package iotservice
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -9,9 +10,12 @@ import (
 )
 
 // FromAMQPMessage converts a amqp.Message into common.Message.
+//
+// Exported to use with a custom stream when devices telemetry is
+// routed for example to an EventhHub instance.
 func FromAMQPMessage(msg *amqp.Message) *common.Message {
 	m := &common.Message{
-		Payload:    msg.Data[0],
+		Payload:    msg.GetData(),
 		Properties: make(map[string]string, len(msg.ApplicationProperties)+5),
 	}
 	if msg.Properties != nil {
@@ -35,24 +39,38 @@ func FromAMQPMessage(msg *amqp.Message) *common.Message {
 		case "iothub-connection-auth-generation-id":
 			m.ConnectionDeviceGenerationID = v.(string)
 		case "iothub-connection-auth-method":
-			m.ConnectionAuthMethod = v.(string)
+			var am common.ConnectionAuthMethod
+			if err := json.Unmarshal([]byte(v.(string)), &am); err != nil {
+				m.Properties[k.(string)] = fmt.Sprint(v)
+				continue
+			}
+			m.ConnectionAuthMethod = &am
 		case "iothub-message-source":
 			m.MessageSource = v.(string)
 		default:
 			m.Properties[k.(string)] = fmt.Sprint(v)
 		}
 	}
+
 	for k, v := range msg.ApplicationProperties {
-		m.Properties[k] = v.(string)
+		if v, ok := v.(string); ok {
+			m.Properties[k] = v
+		} else {
+			m.Properties[k] = ""
+		}
 	}
 	return m
 }
 
-// ToAMQPMessage converts amqp.Message into common.Message.
-func ToAMQPMessage(msg *common.Message) *amqp.Message {
+// toAMQPMessage converts amqp.Message into common.Message.
+func toAMQPMessage(msg *common.Message) *amqp.Message {
 	props := make(map[string]interface{}, len(msg.Properties))
 	for k, v := range msg.Properties {
 		props[k] = v
+	}
+	var expiryTime time.Time
+	if msg.ExpiryTime != nil {
+		expiryTime = *msg.ExpiryTime
 	}
 	return &amqp.Message{
 		Data: [][]byte{msg.Payload},
@@ -61,7 +79,7 @@ func ToAMQPMessage(msg *common.Message) *amqp.Message {
 			UserID:             []byte(msg.UserID),
 			MessageID:          msg.MessageID,
 			CorrelationID:      msg.CorrelationID,
-			AbsoluteExpiryTime: *msg.ExpiryTime,
+			AbsoluteExpiryTime: expiryTime,
 		},
 		ApplicationProperties: props,
 	}

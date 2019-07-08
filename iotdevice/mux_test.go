@@ -7,7 +7,7 @@ import (
 	"github.com/amenzhinsky/iothub/common"
 )
 
-func TestEventsMux(t *testing.T) {
+func TestEventsMuxSub(t *testing.T) {
 	mux := newEventsMux()
 	sub := mux.sub()
 	mux.Dispatch(&common.Message{
@@ -21,13 +21,20 @@ func TestEventsMux(t *testing.T) {
 	mux.Dispatch(&common.Message{
 		Payload: []byte("hello"),
 	})
-	select {
-	case <-sub.C():
+	if !isClosed(sub.C()) {
 		t.Fatal("C is not closed after unsub")
-	default:
 	}
 	if err := sub.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func isClosed(ch <-chan *common.Message) bool {
+	select {
+	case _, ok := <-ch:
+		return !ok
+	default:
+		return false
 	}
 }
 
@@ -41,8 +48,6 @@ func TestEventsMuxClose(t *testing.T) {
 }
 
 func TestMethodMux(t *testing.T) {
-	t.Parallel()
-
 	m := methodMux{}
 	if err := m.handle("add", func(v map[string]interface{}) (map[string]interface{}, error) {
 		v["b"] = 2

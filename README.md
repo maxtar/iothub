@@ -1,51 +1,26 @@
 # iothub
 
-This repository provides Azure IoT Hub SDK for golang and command line tools for device-to-cloud (`iotdevice`) and cloud-to-device (`iotservice`) functionality.
+Azure IoT Hub SDK for Golang, provides both device-to-cloud ([`iotdevice`](iotdevice)) and cloud-to-device ([`iotservice`](iotservice)) packages for end-to-end communication.
 
-This project in the active development state and if you decided to use it anyway, please vendor the source code.
+API is subject to change until `v1.0.0`. Bumping minor version indicates breaking changes.
 
-Only MQTT is available for device-to-cloud communication for because it has many advantages over AMQP and REST: it's stable, widespread, compact and provide many out-of-box features like auto-reconnects.
+See [TODO](#todo) section to see what's missing in the library.
 
-See [TODO](https://github.com/amenzhinsky/iothub#todo) list to learn what is missing.
+## Installation
 
-## Examples
+To install the library as a dependency:
 
-Send a message from an IoT device:
-
-```go
-package main
-
-import (
-	"context"
-	"log"
-	"os"
-
-	"github.com/amenzhinsky/iothub/iotdevice"
-	"github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
-)
-
-func main() {
-	c, err := iotdevice.NewClient(
-		iotdevice.WithTransport(mqtt.New()),
-		iotdevice.WithConnectionString(os.Getenv("DEVICE_CONNECTION_STRING")),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// connect to the iothub
-	if err = c.Connect(context.Background()); err != nil {
-		log.Fatal(err)
-	}
-
-	// send a device-to-cloud message
-	if err = c.SendEvent(context.Background(), []byte(`hello`),
-		iotdevice.WithSendProperty("foo", "bar"),
-	); err != nil {
-		log.Fatal(err)
-	}
-}
+```bash
+go get -u github.com/amenzhinsky/iothub
 ```
+
+To install CLI applications:
+
+```bash
+GO111MODULE=on go get -u github.com/amenzhinsky/iothub/cmd/{iothub-service,iothub-device}
+```
+
+## Usage Example
 
 Receive and print messages from IoT devices in a backend application:
 
@@ -58,44 +33,89 @@ import (
 	"log"
 	"os"
 
-	"github.com/amenzhinsky/iothub/common"
 	"github.com/amenzhinsky/iothub/iotservice"
 )
 
 func main() {
-	c, err := iotservice.NewClient(
-		iotservice.WithConnectionString(os.Getenv("SERVICE_CONNECTION_STRING")),
+	c, err := iotservice.NewFromConnectionString(
+		os.Getenv("IOTHUB_SERVICE_CONNECTION_STRING"),
 	)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Fatal(c.SubscribeEvents(context.Background(), func(msg *common.Message) {
+
+	// subscribe to device-to-cloud events
+	log.Fatal(c.SubscribeEvents(context.Background(), func(msg *iotservice.Event) error {
 		fmt.Printf("%q sends %q", msg.ConnectionDeviceID, msg.Payload)
+		return nil
 	}))
 }
 ```
+
+Send a message from an IoT device:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+
+	"github.com/amenzhinsky/iothub/iotdevice"
+	iotmqtt "github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
+)
+
+func main() {
+	c, err := iotdevice.NewFromConnectionString(
+		iotmqtt.New(), os.Getenv("IOTHUB_DEVICE_CONNECTION_STRING"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// connect to the iothub
+	if err = c.Connect(context.Background()); err != nil {
+		log.Fatal(err)
+	}
+
+	// send a device-to-cloud message
+	if err = c.SendEvent(context.Background(), []byte(`hello`)); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+[cmd/iothub-service](https://github.com/amenzhinsky/iothub/blob/master/cmd/iothub-service) and [cmd/iothub-device](https://github.com/amenzhinsky/iothub/blob/master/cmd/iothub-device) are reference implementations of almost all available features. 
 
 ## CLI
 
 The project provides two command line utilities: `iothub-device` and `iothub-sevice`. First is for using it on IoT devices and the second manages and interacts with them. 
 
-You can perform operations like publishing, subscribing to events and feedback, registering and invoking direct method, etc. straight from the command line.
+You can perform operations like publishing, subscribing to events and feedback, registering and invoking direct methods and so on straight from the command line.
 
-`iothub-service` is a [iothub-explorer](https://github.com/Azure/iothub-explorer) replacement that can be distributed as a single binary opposed to typical nodejs app.
+`iothub-service` is a [iothub-explorer](https://github.com/Azure/iothub-explorer) replacement that can be distributed as a single binary opposed to a typical nodejs app.
 
 See `-help` for more details.
 
 ## Testing
 
-To enable end-to-end testing in the `tests` directory you need to provide `TEST_SERVICE_CONNECTION_STRING` which is a shared access policy connection string.
+`TEST_IOTHUB_SERVICE_CONNECTION_STRING` is required for end-to-end testing, which is a shared access policy connection string with all permissions.
+
+`TEST_EVENTHUB_CONNECTION_STRING` is required for `eventhub` package testing.
 
 ## TODO
 
-1. Stabilize API.
+### iotservice
+
+1. Stabilize API
+1. Fix TODOs
+
+### iotdevice
+
+1. Device modules support.
 1. HTTP transport (files uploading).
 1. AMQP transport (batch sending, WS).
-1. Grammar check plus better documentation.
-1. Rework Subscribe* functions.
 
 ## Contributing
 

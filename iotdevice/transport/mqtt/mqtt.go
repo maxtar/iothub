@@ -2,8 +2,10 @@ package mqtt
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/amenzhinsky/iothub/logger"
 	"net/url"
 	"strconv"
 	"strings"
@@ -11,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/amenzhinsky/iothub/common"
 	"github.com/amenzhinsky/iothub/iotdevice/transport"
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 // DefaultQoS is the default quality of service value.
@@ -24,7 +26,7 @@ type TransportOption func(tr *Transport)
 
 // WithLogger sets logger for errors and warnings
 // plus debug messages when it's enabled.
-func WithLogger(l common.Logger) TransportOption {
+func WithLogger(l logger.Logger) TransportOption {
 	return func(tr *Transport) {
 		tr.logger = l
 	}
@@ -48,8 +50,7 @@ func WithClientOptionsConfig(fn func(opts *mqtt.ClientOptions)) TransportOption 
 // See more: https://docs.microsoft.com/en-us/azure/iot-hub/iot-hub-mqtt-support
 func New(opts ...TransportOption) transport.Transport {
 	tr := &Transport{
-		done:   make(chan struct{}),
-		logger: common.NewLogWrapper(false),
+		done: make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(tr)
@@ -70,7 +71,7 @@ type Transport struct {
 	done chan struct{}         // closed when the transport is closed
 	resp map[uint32]chan *resp // responses from iothub
 
-	logger common.Logger
+	logger logger.Logger
 	cocfg  func(opts *mqtt.ClientOptions)
 }
 
@@ -81,6 +82,10 @@ type resp struct {
 	ver int // twin response only
 }
 
+func (tr *Transport) SetLogger(logger logger.Logger) {
+	tr.logger = logger
+}
+
 func (tr *Transport) Connect(ctx context.Context, creds transport.Credentials) error {
 	tr.mu.Lock()
 	defer tr.mu.Unlock()
@@ -88,32 +93,34 @@ func (tr *Transport) Connect(ctx context.Context, creds transport.Credentials) e
 		return errors.New("already connected")
 	}
 
-	username := creds.Hostname() + "/" + creds.DeviceID() + "/api-version=" + common.APIVersion
+	tlsCfg := &tls.Config{
+		RootCAs: common.RootCAs(),
+	}
+	if crt := creds.GetCertificate(); crt != nil {
+		tlsCfg.Certificates = append(tlsCfg.Certificates, *crt)
+	}
+
+	username := creds.GetHostName() + "/" + creds.GetDeviceID() + "/api-version=2019-03-30"
 	o := mqtt.NewClientOptions()
-	o.SetTLSConfig(creds.TLSConfig())
-	o.AddBroker("tls://" + creds.Hostname() + ":8883")
-	o.SetClientID(creds.DeviceID())
+	o.SetTLSConfig(tlsCfg)
+	o.AddBroker("tls://" + creds.GetHostName() + ":8883")
+	o.SetClientID(creds.GetDeviceID())
 	o.SetCredentialsProvider(func() (string, string) {
-		if !creds.IsSAS() {
+		if crt := creds.GetCertificate(); crt != nil {
 			return username, ""
 		}
 		// TODO: renew token only when it expires in case an external token provider is used
 		// TODO: this can slow down the reconnect feature, so need to figure out max token lifetime
-		password, err := creds.Token(ctx, creds.Hostname(), time.Hour)
+		sas, err := creds.Token(creds.GetHostName(), time.Hour)
 		if err != nil {
 			panic(err)
 		}
-		return username, password
+		return username, sas.String()
 	})
 	o.SetWriteTimeout(30 * time.Second)
 	o.SetMaxReconnectInterval(30 * time.Second) // default is 15min, way to long
-	o.SetOnConnectHandler(func(_ mqtt.Client) {
-		tr.logger.Debugf("connection established")
-	})
-	o.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
-		tr.logger.Debugf("connection lost: %v", err)
-	})
 	o.SetOnConnectHandler(func(c mqtt.Client) {
+		tr.logger.Debugf("connection established")
 		tr.subm.RLock()
 		for _, sub := range tr.subs {
 			if err := sub(); err != nil {
@@ -121,6 +128,9 @@ func (tr *Transport) Connect(ctx context.Context, creds transport.Credentials) e
 			}
 		}
 		tr.subm.RUnlock()
+	})
+	o.SetConnectionLostHandler(func(_ mqtt.Client, err error) {
+		tr.logger.Debugf("connection lost: %v", err)
 	})
 
 	if tr.cocfg != nil {
@@ -132,7 +142,7 @@ func (tr *Transport) Connect(ctx context.Context, creds transport.Credentials) e
 		return err
 	}
 
-	tr.did = creds.DeviceID()
+	tr.did = creds.GetDeviceID()
 	tr.conn = c
 	return nil
 }

@@ -11,7 +11,6 @@ import (
 	"sync"
 
 	"github.com/amenzhinsky/iothub/cmd/internal"
-	"github.com/amenzhinsky/iothub/common"
 	"github.com/amenzhinsky/iothub/iotdevice"
 	"github.com/amenzhinsky/iothub/iotdevice/transport"
 	"github.com/amenzhinsky/iothub/iotdevice/transport/mqtt"
@@ -19,7 +18,7 @@ import (
 
 var transports = map[string]func() (transport.Transport, error){
 	"mqtt": func() (transport.Transport, error) {
-		return mqtt.New(mqtt.WithLogger(common.NewLogWrapper(debugFlag))), nil
+		return mqtt.New(), nil
 	},
 	"amqp": func() (transport.Transport, error) {
 		return nil, errors.New("not implemented")
@@ -31,7 +30,7 @@ var transports = map[string]func() (transport.Transport, error){
 
 var (
 	debugFlag     bool
-	compressFlag  bool
+	formatFlag    string
 	quiteFlag     bool
 	transportFlag string
 	midFlag       string
@@ -43,6 +42,10 @@ var (
 	tlsKeyFlag   string
 	deviceIDFlag string
 	hostnameFlag string
+
+	propsFlag map[string]string
+
+	twinPropsFlag map[string]interface{}
 )
 
 func main() {
@@ -55,12 +58,13 @@ func main() {
 }
 
 const help = `iothub-device helps iothub devices to communicate with the cloud.
-The $DEVICE_CONNECTION_STRING environment variable is required unless you use x509 authentication.`
+$IOTHUB_DEVICE_CONNECTION_STRING environment variable is required unless you use x509 authentication.`
 
 func run() error {
-	cli, err := internal.New(help, func(f *flag.FlagSet) {
+	ctx := context.Background()
+	return internal.New(help, func(f *flag.FlagSet) {
 		f.BoolVar(&debugFlag, "debug", false, "enable debug mode")
-		f.BoolVar(&compressFlag, "compress", false, "compress data (remove JSON indentations)")
+		f.StringVar(&formatFlag, "format", "json-pretty", "data output format <json|json-pretty>")
 		f.StringVar(&transportFlag, "transport", "mqtt", "transport to use <mqtt|amqp|http>")
 		f.StringVar(&tlsCertFlag, "tls-cert", "", "path to x509 cert file")
 		f.StringVar(&tlsKeyFlag, "tls-key", "", "path to x509 key file")
@@ -68,80 +72,55 @@ func run() error {
 		f.StringVar(&hostnameFlag, "hostname", "", "hostname to connect to, required for x509")
 	}, []*internal.Command{
 		{
-			"send", "s",
-			"PAYLOAD [KEY VALUE]...",
-			"send a message to the cloud (D2C)",
-			wrap(send),
-			func(f *flag.FlagSet) {
+			Name:    "send",
+			Args:    []string{"PAYLOAD"},
+			Desc:    "send a message to the cloud (D2C)",
+			Handler: wrap(ctx, send),
+			ParseFunc: func(f *flag.FlagSet) {
 				f.StringVar(&midFlag, "mid", "", "identifier for the message")
 				f.StringVar(&cidFlag, "cid", "", "message identifier in a request-reply")
 				f.IntVar(&qosFlag, "qos", mqtt.DefaultQoS, "QoS value, 0 or 1 (mqtt only)")
+				f.Var((*internal.StringsMapFlag)(&propsFlag), "prop", "custom property, key=value")
 			},
 		},
 		{
-			"watch-events", "we",
-			"",
-			"subscribe to messages sent from the cloud (C2D)",
-			wrap(watchEvents),
-			nil,
+			Name:    "watch-events",
+			Desc:    "subscribe to messages sent from the cloud (C2D)",
+			Handler: wrap(ctx, watchEvents),
 		},
 		{
-			"watch-twin", "wt",
-			"",
-			"subscribe to desired twin state updates",
-			wrap(watchTwin),
-			nil,
+			Name:    "watch-twin",
+			Desc:    "subscribe to desired twin state updates",
+			Handler: wrap(ctx, watchTwin),
 		},
 		{
-			"direct-method", "dm",
-			"NAME",
-			"handle the named direct method, reads responses from STDIN",
-			wrap(directMethod),
-			func(f *flag.FlagSet) {
+			Name:    "direct-method",
+			Args:    []string{"NAME"},
+			Desc:    "handle the named direct method, reads responses from STDIN",
+			Handler: wrap(ctx, directMethod),
+			ParseFunc: func(f *flag.FlagSet) {
 				f.BoolVar(&quiteFlag, "quite", false, "disable additional hints")
 			},
 		},
 		{
-			"twin-state", "ts",
-			"",
-			"retrieve desired and reported states",
-			wrap(twin),
-			nil,
+			Name:    "twin-state",
+			Desc:    "retrieve desired and reported states",
+			Handler: wrap(ctx, twin),
 		},
 		{
-			"update-twin", "ut",
-			"[KEY VALUE]...",
-			"updates the twin device deported state, null means delete the key",
-			wrap(updateTwin),
-			nil,
+			Name:    "update-twin",
+			Args:    []string{"[KEY VALUE]..."},
+			Desc:    "updates the twin device deported state, null means delete the key",
+			Handler: wrap(ctx, updateTwin),
+			ParseFunc: func(f *flag.FlagSet) {
+				f.Var((*internal.JSONMapFlag)(&twinPropsFlag), "prop", "custom property, key=value")
+			},
 		},
-	})
-	if err != nil {
-		return err
-	}
-	return cli.Run(context.Background(), os.Args...)
+	}).Run(os.Args)
 }
 
-func wrap(fn func(context.Context, *flag.FlagSet, *iotdevice.Client) error) internal.HandlerFunc {
-	return func(ctx context.Context, f *flag.FlagSet) error {
-		var auth iotdevice.ClientOption
-		if tlsCertFlag != "" && tlsKeyFlag != "" {
-			if hostnameFlag == "" {
-				return errors.New("hostname is required for x509 authentication")
-			}
-			if deviceIDFlag == "" {
-				return errors.New("device-id is required for x509 authentication")
-			}
-			auth = iotdevice.WithX509FromFile(deviceIDFlag, hostnameFlag, tlsCertFlag, tlsKeyFlag)
-		} else {
-			// we cannot accept connection string from parameters
-			cs := os.Getenv("DEVICE_CONNECTION_STRING")
-			if cs == "" {
-				return errors.New("$DEVICE_CONNECTION_STRING is empty")
-			}
-			auth = iotdevice.WithConnectionString(cs)
-		}
-
+func wrap(ctx context.Context, fn func(context.Context, *iotdevice.Client, []string) error) internal.HandlerFunc {
+	return func(args []string) error {
 		mk, ok := transports[transportFlag]
 		if !ok {
 			return fmt.Errorf("unknown transport %q", transportFlag)
@@ -150,78 +129,69 @@ func wrap(fn func(context.Context, *flag.FlagSet, *iotdevice.Client) error) inte
 		if err != nil {
 			return err
 		}
-		c, err := iotdevice.NewClient(
-			iotdevice.WithLogger(common.NewLogWrapper(debugFlag)),
-			iotdevice.WithTransport(t),
-			auth,
-		)
+
+		var client *iotdevice.Client
+		if tlsCertFlag != "" && tlsKeyFlag != "" {
+			if hostnameFlag == "" {
+				return errors.New("hostname is required for x509 authentication")
+			}
+			if deviceIDFlag == "" {
+				return errors.New("device-id is required for x509 authentication")
+			}
+			client, err = iotdevice.NewFromX509FromFile(
+				t, deviceIDFlag, hostnameFlag, tlsCertFlag, tlsKeyFlag,
+			)
+		} else {
+			client, err = iotdevice.NewFromConnectionString(
+				t, os.Getenv("IOTHUB_DEVICE_CONNECTION_STRING"),
+			)
+		}
 		if err != nil {
 			return err
 		}
-		if err := c.Connect(ctx); err != nil {
+		if err := client.Connect(ctx); err != nil {
 			return err
 		}
-		return fn(ctx, f, c)
+		return fn(ctx, client, args)
 	}
 }
 
-func send(ctx context.Context, f *flag.FlagSet, c *iotdevice.Client) error {
-	if f.NArg() < 1 {
-		return internal.ErrInvalidUsage
-	}
-	var props map[string]string
-	if f.NArg() > 1 {
-		var err error
-		props, err = internal.ArgsToMap(f.Args()[1:])
-		if err != nil {
-			return err
-		}
-	}
-	return c.SendEvent(ctx, []byte(f.Arg(0)),
-		iotdevice.WithSendProperties(props),
+func send(ctx context.Context, c *iotdevice.Client, args []string) error {
+	return c.SendEvent(ctx, []byte(args[0]),
+		iotdevice.WithSendProperties(propsFlag),
 		iotdevice.WithSendMessageID(midFlag),
 		iotdevice.WithSendCorrelationID(cidFlag),
 		iotdevice.WithSendQoS(qosFlag),
 	)
 }
 
-func watchEvents(ctx context.Context, f *flag.FlagSet, c *iotdevice.Client) error {
-	if f.NArg() != 0 {
-		return internal.ErrInvalidUsage
-	}
+func watchEvents(ctx context.Context, c *iotdevice.Client, args []string) error {
 	sub, err := c.SubscribeEvents(ctx)
 	if err != nil {
 		return err
 	}
 	for msg := range sub.C() {
-		if err = internal.OutputJSON(msg, compressFlag); err != nil {
+		if err = internal.Output(msg, formatFlag); err != nil {
 			return err
 		}
 	}
 	return sub.Err()
 }
 
-func watchTwin(ctx context.Context, f *flag.FlagSet, c *iotdevice.Client) error {
-	if f.NArg() != 0 {
-		return internal.ErrInvalidUsage
-	}
+func watchTwin(ctx context.Context, c *iotdevice.Client, args []string) error {
 	sub, err := c.SubscribeTwinUpdates(ctx)
 	if err != nil {
 		return err
 	}
 	for twin := range sub.C() {
-		if err = internal.OutputJSON(twin, compressFlag); err != nil {
+		if err = internal.Output(twin, formatFlag); err != nil {
 			return err
 		}
 	}
 	return sub.Err()
 }
 
-func directMethod(ctx context.Context, f *flag.FlagSet, c *iotdevice.Client) error {
-	if f.NArg() != 1 {
-		return internal.ErrInvalidUsage
-	}
-
+func directMethod(ctx context.Context, c *iotdevice.Client, args []string) error {
 	// if an error occurs during the method invocation,
 	// immediately return and display the error.
 	errc := make(chan error, 1)
@@ -229,7 +199,7 @@ func directMethod(ctx context.Context, f *flag.FlagSet, c *iotdevice.Client) err
 	in := bufio.NewReader(os.Stdin)
 	mu := &sync.Mutex{}
 
-	if err := c.RegisterMethod(ctx, f.Arg(0),
+	if err := c.RegisterMethod(ctx, args[0],
 		func(p map[string]interface{}) (map[string]interface{}, error) {
 			mu.Lock()
 			defer mu.Unlock()
@@ -263,7 +233,7 @@ func directMethod(ctx context.Context, f *flag.FlagSet, c *iotdevice.Client) err
 	return <-errc
 }
 
-func twin(ctx context.Context, _ *flag.FlagSet, c *iotdevice.Client) error {
+func twin(ctx context.Context, c *iotdevice.Client, args []string) error {
 	desired, reported, err := c.RetrieveTwinState(ctx)
 	if err != nil {
 		return err
@@ -284,24 +254,8 @@ func twin(ctx context.Context, _ *flag.FlagSet, c *iotdevice.Client) error {
 	return nil
 }
 
-func updateTwin(ctx context.Context, f *flag.FlagSet, c *iotdevice.Client) error {
-	if f.NArg() == 0 {
-		return internal.ErrInvalidUsage
-	}
-
-	s, err := internal.ArgsToMap(f.Args())
-	if err != nil {
-		return err
-	}
-	m := make(iotdevice.TwinState, len(s))
-	for k, v := range s {
-		if v == "null" {
-			m[k] = nil
-		} else {
-			m[k] = v
-		}
-	}
-	ver, err := c.UpdateTwinState(ctx, m)
+func updateTwin(ctx context.Context, c *iotdevice.Client, args []string) error {
+	ver, err := c.UpdateTwinState(ctx, twinPropsFlag)
 	if err != nil {
 		return err
 	}
