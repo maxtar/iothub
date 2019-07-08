@@ -28,27 +28,27 @@ Receive and print messages from IoT devices in a backend application:
 package main
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"os"
+    "context"
+    "fmt"
+    "log"
+    "os"
 
-	"github.com/maxtar/iothub/iotservice"
+    "github.com/maxtar/iothub/iotservice"
 )
 
 func main() {
-	c, err := iotservice.NewFromConnectionString(
-		os.Getenv("IOTHUB_SERVICE_CONNECTION_STRING"),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
+    c, err := iotservice.NewFromConnectionString(
+        os.Getenv("IOTHUB_SERVICE_CONNECTION_STRING"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
 
-	// subscribe to device-to-cloud events
-	log.Fatal(c.SubscribeEvents(context.Background(), func(msg *iotservice.Event) error {
-		fmt.Printf("%q sends %q", msg.ConnectionDeviceID, msg.Payload)
-		return nil
-	}))
+    // subscribe to device-to-cloud events
+    log.Fatal(c.SubscribeEvents(context.Background(), func(msg *iotservice.Event) error {
+        fmt.Printf("%q sends %q", msg.ConnectionDeviceID, msg.Payload)
+        return nil
+    }))
 }
 ```
 
@@ -58,31 +58,31 @@ Send a message from an IoT device:
 package main
 
 import (
-	"context"
-	"log"
-	"os"
+    "context"
+    "log"
+    "os"
 
-	"github.com/maxtar/iothub/iotdevice"
-	iotmqtt "github.com/maxtar/iothub/iotdevice/transport/mqtt"
+    "github.com/maxtar/iothub/iotdevice"
+    iotmqtt "github.com/maxtar/iothub/iotdevice/transport/mqtt"
 )
 
 func main() {
-	c, err := iotdevice.NewFromConnectionString(
-		iotmqtt.New(), os.Getenv("IOTHUB_DEVICE_CONNECTION_STRING"),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
+    c, err := iotdevice.NewFromConnectionString(
+        iotmqtt.New(), os.Getenv("IOTHUB_DEVICE_CONNECTION_STRING"),
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
 
-	// connect to the iothub
-	if err = c.Connect(context.Background()); err != nil {
-		log.Fatal(err)
-	}
+    // connect to the iothub
+    if err = c.Connect(context.Background()); err != nil {
+        log.Fatal(err)
+    }
 
-	// send a device-to-cloud message
-	if err = c.SendEvent(context.Background(), []byte(`hello`)); err != nil {
-		log.Fatal(err)
-	}
+    // send a device-to-cloud message
+    if err = c.SendEvent(context.Background(), []byte(`hello`)); err != nil {
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -113,6 +113,7 @@ See `-help` for more details.
 
 ### iotdevice
 
+1. Change twins message to Interface instead of map.
 1. Device modules support.
 1. HTTP transport (files uploading).
 1. AMQP transport (batch sending, WS).
